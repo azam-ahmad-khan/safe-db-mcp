@@ -1,0 +1,33 @@
+[project]
+name = "safe-db-mcp"
+version = "0.1.0"
+description = "A read-only SQL MCP server with production guardrails for AI agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Azam Khan" }]
+dependencies = [
+    "mcp>=1.2",
+    "sqlglot>=30,<31",
+]
+
+[project.optional-dependencies]
+mysql = [
+    "pymysql>=1.1",
+]
+keychain = [
+    "keyring>=24",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[project.scripts]
+safe-db-mcp = "safe_db_mcp.server:main"
