@@ -90,7 +90,7 @@ uv run python demo/walkthrough.py
 It works with any app that speaks MCP, whichever model is behind it: Claude, GPT, Gemini, DeepSeek or a local model.
 Every app needs the same three things:
 
-| | |
+| Setting | Value |
 |---|---|
 | **Command** | `uv` |
 | **Arguments** | `--directory /absolute/path/to/safe-db-mcp run safe-db-mcp` |
