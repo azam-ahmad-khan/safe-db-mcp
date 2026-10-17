@@ -2,10 +2,10 @@
 
 **Let an AI agent query your database without letting it break anything or leak anyone's data.**
 
-`safe-db-mcp` is a small [Model Context Protocol](https://modelcontextprotocol.io) server that gives an agent
-(Claude Code, Claude Desktop or any MCP client) read-only SQL access to SQLite or MySQL, behind production-style
-guardrails: a statement allow-list, a read-only connection, row caps, query timeouts, PII masking and an audit log of
-every call.
+`safe-db-mcp` is a small [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent
+read-only SQL access to SQLite or MySQL, behind production-style guardrails: a statement allow-list, a read-only
+connection, row caps, query timeouts, PII masking and an audit log of every call. It works with any MCP app (Claude,
+OpenAI Codex, Gemini CLI, Cursor, VS Code…), whichever model is behind it.
 
 ```text
 > Clean up cancelled orders
@@ -85,20 +85,40 @@ Watch a scripted agent session, with good questions, bad ones and the resulting 
 uv run python demo/walkthrough.py
 ```
 
-## Use it from Claude Code
+## Connect it to your AI assistant
 
-```bash
-claude mcp add safe-db \
-  -e SAFE_DB_DIALECT=sqlite \
-  -e SAFE_DB_SQLITE_PATH="$PWD/demo/shop.db" \
-  -e SAFE_DB_MASKED_COLUMNS=email,phone \
-  -- uv --directory "$PWD" run safe-db-mcp
+It works with any app that speaks MCP, whichever model is behind it: Claude, GPT, Gemini, DeepSeek or a local model.
+Every app needs the same three things:
+
+| | |
+|---|---|
+| **Command** | `uv` |
+| **Arguments** | `--directory /absolute/path/to/safe-db-mcp run safe-db-mcp` |
+| **Environment** | `SAFE_DB_DIALECT=sqlite`<br>`SAFE_DB_SQLITE_PATH=/absolute/path/to/safe-db-mcp/demo/shop.db`<br>`SAFE_DB_MASKED_COLUMNS=email,phone` |
+
+### The easy way: let your assistant set it up
+
+If your assistant can edit its own settings (Claude Code, Codex CLI, Gemini CLI, Cursor, VS Code agent mode…), open it
+in this folder and paste:
+
+```text
+Add a local (stdio) MCP server named "safe-db" to your MCP configuration.
+Command: uv
+Arguments: --directory <absolute path of this folder> run safe-db-mcp
+Environment variables:
+  SAFE_DB_DIALECT=sqlite
+  SAFE_DB_SQLITE_PATH=<absolute path of this folder>/demo/shop.db
+  SAFE_DB_MASKED_COLUMNS=email,phone
+Use your own config format, show me the change before you save it, then tell me how to reload so the
+list_tables, describe_table and run_query tools show up.
 ```
 
-Then ask Claude something like *"Which product category made the most money in March?"* or *"Delete the cancelled
+Then ask it something like *"Which product category made the most money in March?"* or *"Delete the cancelled
 orders"*, and watch the second one get refused.
 
-For Claude Desktop, add the same thing to `claude_desktop_config.json`:
+### By hand
+
+Most apps take the same JSON block:
 
 ```json
 {
@@ -115,6 +135,17 @@ For Claude Desktop, add the same thing to `claude_desktop_config.json`:
   }
 }
 ```
+
+| App | Where it goes |
+|-----|---------------|
+| Claude Desktop | `claude_desktop_config.json`: the block above |
+| Cursor | `.cursor/mcp.json` in a project, or `~/.cursor/mcp.json`: the block above, plus `"type": "stdio"` |
+| Gemini CLI | `.gemini/settings.json` in a project, or `~/.gemini/settings.json`: the block above |
+| VS Code (Copilot agent mode) | `.vscode/mcp.json`: the same entry, but the top-level key is `servers` and it needs `"type": "stdio"` |
+| Claude Code | One command, run from this folder:<br>`claude mcp add safe-db -e SAFE_DB_DIALECT=sqlite -e SAFE_DB_SQLITE_PATH="$PWD/demo/shop.db" -e SAFE_DB_MASKED_COLUMNS=email,phone -- uv --directory "$PWD" run safe-db-mcp` |
+| OpenAI Codex CLI | One command, run from this folder (it writes `~/.codex/config.toml`):<br>`codex mcp add safe-db --env SAFE_DB_DIALECT=sqlite --env SAFE_DB_SQLITE_PATH="$PWD/demo/shop.db" --env SAFE_DB_MASKED_COLUMNS=email,phone -- uv --directory "$PWD" run safe-db-mcp` |
+| ChatGPT (web and desktop app) | Not yet: ChatGPT only connects to remote MCP servers over HTTPS, and this server runs locally over stdio. |
+| Ollama, DeepSeek and other models | These are models, not MCP apps. Choose them inside any MCP app that lets you bring your own model, then use that app's row above. |
 
 ## Configuration
 
