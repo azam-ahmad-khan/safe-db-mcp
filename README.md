@@ -67,7 +67,7 @@ agent can correct itself instead of retrying blindly.
 Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/token-hoarder/safe-db-mcp.git
+git clone https://github.com/azam-ahmad-khan/safe-db-mcp.git
 cd safe-db-mcp
 uv sync
 ```
