@@ -32,6 +32,7 @@ class Settings:
     timeout_seconds: float
     masked_columns: frozenset[str]
     audit_log_path: Path
+    relationships_path: Path | None = None
     sqlite_path: Path | None = None
     mysql_host: str | None = None
     mysql_port: int = 3306
@@ -54,6 +55,7 @@ class Settings:
                 name.strip().lower() for name in environ.get("SAFE_DB_MASKED_COLUMNS", "").split(",") if name.strip()
             ),
             "audit_log_path": Path(environ.get("SAFE_DB_AUDIT_LOG") or DEFAULT_AUDIT_LOG_PATH).expanduser(),
+            "relationships_path": _optional_path(environ, "SAFE_DB_RELATIONSHIPS_FILE"),
         }
 
         if dialect == "sqlite":
@@ -94,6 +96,11 @@ def _load_mysql_password(environ: Mapping[str, str], mysql_user: str) -> str | N
     except ImportError:
         return None
     return keyring.get_password(KEYCHAIN_SERVICE_NAME, mysql_user)
+
+
+def _optional_path(environ: Mapping[str, str], name: str) -> Path | None:
+    value = environ.get(name, "").strip()
+    return Path(value).expanduser() if value else None
 
 
 def _required(environ: Mapping[str, str], name: str) -> str:

@@ -1,0 +1,64 @@
+version: 1
+dialect: sqlite
+generated_by: joinscout
+relationships:
+- id: order_items.order_id -> orders.id
+  from:
+    table: order_items
+    columns:
+    - order_id
+  to:
+    table: orders
+    columns:
+    - id
+  cardinality: many_to_one
+  status: approved
+  confidence: 0.68
+  evidence:
+  - kind: name
+    detail: order_id = <orders singular>_id
+  - kind: data
+    detail: 100.0% of 1000 all distinct child values found in the parent (salted hashes)
+  reviewed_by: demo
+  reviewed_at: '2026-10-18'
+  note: approved for the demo
+- id: order_items.product_id -> products.id
+  from:
+    table: order_items
+    columns:
+    - product_id
+  to:
+    table: products
+    columns:
+    - id
+  cardinality: many_to_one
+  status: approved
+  confidence: 0.68
+  evidence:
+  - kind: name
+    detail: product_id = <products singular>_id
+  - kind: data
+    detail: 100.0% of 20 all distinct child values found in the parent (salted hashes)
+  reviewed_by: demo
+  reviewed_at: '2026-10-18'
+  note: approved for the demo
+- id: orders.customer_id -> customers.id
+  from:
+    table: orders
+    columns:
+    - customer_id
+  to:
+    table: customers
+    columns:
+    - id
+  cardinality: many_to_one
+  status: approved
+  confidence: 0.68
+  evidence:
+  - kind: name
+    detail: customer_id = <customers singular>_id
+  - kind: data
+    detail: 100.0% of 196 all distinct child values found in the parent (salted hashes)
+  reviewed_by: demo
+  reviewed_at: '2026-10-18'
+  note: approved for the demo

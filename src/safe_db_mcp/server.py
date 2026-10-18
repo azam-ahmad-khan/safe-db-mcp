@@ -14,6 +14,7 @@ from safe_db_mcp.audit import AuditLog
 from safe_db_mcp.config import ConfigError, Settings, create_database
 from safe_db_mcp.database import DatabaseQueryError, QueryTimeout
 from safe_db_mcp.guards import QueryRejected
+from safe_db_mcp.relationships import RelationshipFileError, RelationshipGraph, load_relationships
 from safe_db_mcp.runner import SafeQueryRunner
 
 log = logging.getLogger("safe_db_mcp")
@@ -24,11 +25,16 @@ Only single SELECT, SHOW, DESCRIBE and EXPLAIN statements are accepted; anything
 Results are capped, so filter and aggregate in SQL instead of fetching whole tables.
 Some columns hold personal data: they come back masked and cannot be filtered, sorted or transformed."""
 
+RELATIONSHIP_INSTRUCTIONS = """
+This database declares few or no foreign keys. Before writing a join, call join_path or describe_relationships:
+they list joins a person has reviewed and approved. Prefer those over guessing from column names."""
+
 READ_ONLY_TOOL = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 
 
 def build_server(runner: SafeQueryRunner) -> MCPServer:
-    server = MCPServer(name="safe-db", instructions=SERVER_INSTRUCTIONS)
+    instructions = SERVER_INSTRUCTIONS + (RELATIONSHIP_INSTRUCTIONS if runner.relationships is not None else "")
+    server = MCPServer(name="safe-db", instructions=instructions)
 
     @server.tool(annotations=READ_ONLY_TOOL)
     def run_query(sql: str) -> dict[str, Any]:
@@ -44,6 +50,18 @@ def build_server(runner: SafeQueryRunner) -> MCPServer:
     def describe_table(table_name: str) -> dict[str, Any]:
         """List a table's columns with their types."""
         return _call_guarded(lambda: runner.describe_table(table_name))
+
+    if runner.relationships is not None:
+
+        @server.tool(annotations=READ_ONLY_TOOL)
+        def describe_relationships(table_name: str) -> dict[str, Any]:
+            """List the approved joins into and out of a table, with ready-to-use join conditions."""
+            return runner.describe_relationships(table_name)
+
+        @server.tool(annotations=READ_ONLY_TOOL)
+        def join_path(table_a: str, table_b: str) -> dict[str, Any]:
+            """Find the shortest chain of approved joins between two tables, as a FROM ... JOIN ... clause."""
+            return runner.join_path(table_a, table_b)
 
     return server
 
@@ -65,22 +83,28 @@ def main() -> None:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         settings = Settings.from_env()
+        relationships = None
+        if settings.relationships_path is not None:
+            relationships = RelationshipGraph(load_relationships(settings.relationships_path, settings.masked_columns))
         runner = SafeQueryRunner(
             database=create_database(settings),
             audit_log=AuditLog(settings.audit_log_path),
             max_rows=settings.max_rows,
             masked_columns=settings.masked_columns,
+            relationships=relationships,
         )
-    except (ConfigError, FileNotFoundError, RuntimeError, OSError) as start_up_error:
+    except (ConfigError, RelationshipFileError, FileNotFoundError, RuntimeError, OSError) as start_up_error:
         log.error("safe_db_mcp main start-up failed reason->%s", start_up_error)
         sys.exit(1)
     log.info(
-        "safe_db_mcp main started dialect->%s maxRows->%s timeoutSeconds->%s maskedColumns->%s auditLog->%s",
+        "safe_db_mcp main started dialect->%s maxRows->%s timeoutSeconds->%s maskedColumns->%s auditLog->%s "
+        "approvedRelationships->%s",
         settings.dialect,
         settings.max_rows,
         settings.timeout_seconds,
         len(settings.masked_columns),
         settings.audit_log_path,
+        len(relationships) if relationships is not None else "off",
     )
     build_server(runner).run("stdio")
 

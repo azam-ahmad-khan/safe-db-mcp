@@ -59,6 +59,7 @@ flowchart LR
 | 6 | **Credentials out of reach** ([`config.py`](src/safe_db_mcp/config.py)) | Connection settings come from environment variables. The password comes from `SAFE_DB_PASSWORD` or the OS keychain, and it never appears in `repr()` or logs. | No tool takes a host, user or password argument, so a prompt can't redirect the server to another database or extract the secret. |
 
 Agents get three tools, each marked `readOnlyHint`: `list_tables`, `describe_table(table_name)` and `run_query(sql)`.
+Two more appear when you give the server a file of approved joins (see [Approved joins](#approved-joins-optional)).
 Errors come back as plain sentences ("Query rejected: …", "Query timed out: … Narrow it with filters or LIMIT."), so the
 agent can correct itself instead of retrying blindly.
 
@@ -159,6 +160,7 @@ Most apps take the same JSON block:
 | `SAFE_DB_TIMEOUT_SECONDS` | `10` | Per-query time limit |
 | `SAFE_DB_MASKED_COLUMNS` | none | Comma-separated column names to mask, case-insensitive |
 | `SAFE_DB_AUDIT_LOG` | `~/.safe-db-mcp/audit.jsonl` | Where the audit log is appended |
+| `SAFE_DB_RELATIONSHIPS_FILE` | none | A reviewed `relationships.yml`; turns on `join_path` and `describe_relationships` |
 
 ### MySQL
 
@@ -180,13 +182,68 @@ Then store the password in the OS keychain instead of a config file:
 uv run keyring set safe-db-mcp agent_reader
 ```
 
+## Approved joins (optional)
+
+Many real databases never declared their foreign keys. The application knows that `orders.customer_id` points at
+`customers.id`, but the schema doesn't say so. An agent then has to guess its joins from column names, and a confident
+wrong join returns plausible-looking wrong numbers, which is worse than an error.
+
+If you have a list of joins a person has checked, point the server at it:
+
+```bash
+uv sync --extra relationships
+SAFE_DB_RELATIONSHIPS_FILE=/absolute/path/to/relationships.yml
+```
+
+The agent then gets two more read-only tools:
+
+| Tool | Returns |
+|------|---------|
+| `describe_relationships(table_name)` | The approved joins into and out of a table, each with a ready-to-use join condition |
+| `join_path(table_a, table_b)` | The shortest chain of approved joins (up to 4), as a `FROM … JOIN … ON …` clause |
+
+```text
+> Which product categories do customers in Springfield buy?
+  join_path({"table_a": "customers", "table_b": "products"})
+  ✓ FROM customers
+    JOIN orders ON orders.customer_id = customers.id
+    JOIN order_items ON order_items.order_id = orders.id
+    JOIN products ON order_items.product_id = products.id
+```
+
+The security model doesn't change:
+
+- **The server never infers anything.** It doesn't sample data, parse code or read query logs, and it needs no
+  extra database permissions. The two tools answer from the file, in memory, and never touch the database (a test
+  proves it). Every call is still written to the audit log.
+- **Only `status: approved` entries are loaded.** Proposed and rejected entries are ignored, so an unreviewed guess
+  never reaches the agent.
+- **A malformed file stops the server from starting.** It doesn't half-load the file or guess what was meant.
+- **Joins on masked columns are dropped**, because `run_query` would refuse the query anyway.
+- The SQL that `join_path` suggests still goes through `run_query` and every guard above.
+
+The file format is the contract with [joinscout](https://github.com/azam-ahmad-khan/joinscout), a separate CLI that
+proposes these relationships from naming conventions, application code (MyBatis, JPA, raw SQL), query logs and
+hashed data checks, and keeps each one `proposed` until a person approves it. Inference lives in its own tool on
+purpose: it needs more access (code, logs, data samples) than an agent-facing server should have. You can also write
+the file by hand. [`demo/relationships.yml`](demo/relationships.yml) is joinscout's output for the demo shop:
+
+```yaml
+version: 1
+relationships:
+- from: {table: orders, columns: [customer_id]}
+  to: {table: customers, columns: [id]}
+  cardinality: many_to_one   # or one_to_one
+  status: approved           # only approved entries are loaded
+```
+
 ## Tests and evals
 
 ```bash
 uv run pytest
 ```
 
-There are 116 unit tests covering the guards, the database layer, config, the audit log and the MCP server end to
+There are 132 unit tests covering the guards, the database layer, config, the audit log, approved joins and the MCP server end to
 end (in-memory client). Seven more MySQL integration tests run against a throwaway container:
 
 ```bash
@@ -238,6 +295,8 @@ This is defence in depth, not a proof. Specifically:
   to steer it. Treat query results as untrusted input in your agent loop.
 - **The audit log is a local file.** It's append-only by convention, not tamper-proof. In production, ship it to your
   log pipeline.
+- **Approved joins are only as good as the review.** The server trusts `status: approved`. It doesn't check that
+  the tables still exist, so re-run the review after schema changes.
 - **SQLite and MySQL only.** Postgres would need its own backend (`default_transaction_read_only`, `statement_timeout`).
 
 ## Project layout
@@ -247,6 +306,7 @@ src/safe_db_mcp/
   guards.py     statement allow-list, row-limit rewrite, masking rules
   database.py   read-only SQLite / MySQL backends, row cap, timeouts
   runner.py     check → cap → execute → mask → audit, in that order
+  relationships.py  approved joins from relationships.yml, shortest join paths
   audit.py      JSON-lines audit log
   config.py     settings from env, password from env or keychain
   server.py     MCP tools over stdio

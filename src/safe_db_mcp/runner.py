@@ -12,14 +12,23 @@ from typing import Any
 from safe_db_mcp.audit import AuditLog
 from safe_db_mcp.database import Database, DatabaseQueryError, QueryResult, QueryTimeout
 from safe_db_mcp.guards import QueryRejected, apply_row_limit, check_query, mask_rows
+from safe_db_mcp.relationships import RelationshipGraph
 
 
 class SafeQueryRunner:
-    def __init__(self, database: Database, audit_log: AuditLog, max_rows: int, masked_columns: Iterable[str] = ()):
+    def __init__(
+        self,
+        database: Database,
+        audit_log: AuditLog,
+        max_rows: int,
+        masked_columns: Iterable[str] = (),
+        relationships: RelationshipGraph | None = None,
+    ):
         self._database = database
         self._audit_log = audit_log
         self._max_rows = max_rows
         self._masked_columns = frozenset(name.lower() for name in masked_columns)
+        self.relationships = relationships
 
     def run_query(self, sql: str) -> dict[str, Any]:
         started = time.monotonic()
@@ -51,6 +60,23 @@ class SafeQueryRunner:
         if not query_result.rows:
             raise DatabaseQueryError(f"no table or view named {table_name!r}")
         return self._to_response(query_result)
+
+    def describe_relationships(self, table_name: str) -> dict[str, Any]:
+        response = self.relationships.describe(table_name)
+        self._audit_log.record(
+            tool="describe_relationships",
+            outcome="allowed",
+            table=table_name,
+            row_count=len(response["references"]) + len(response["referenced_by"]),
+        )
+        return response
+
+    def join_path(self, table_a: str, table_b: str) -> dict[str, Any]:
+        response = self.relationships.join_path(table_a, table_b)
+        self._audit_log.record(
+            tool="join_path", outcome="allowed", table=table_a, other_table=table_b, found=response["found"]
+        )
+        return response
 
     def _execute(self, tool: str, run, started: float, **audit_details: Any) -> QueryResult:
         try:

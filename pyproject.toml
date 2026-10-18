@@ -18,9 +18,12 @@ mysql = [
 keychain = [
     "keyring>=24",
 ]
+relationships = [
+    "pyyaml>=6",
+]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pyyaml>=6"]
 
 [build-system]
 requires = ["hatchling"]
