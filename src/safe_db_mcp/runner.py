@@ -13,6 +13,7 @@ from safe_db_mcp.audit import AuditLog
 from safe_db_mcp.database import Database, DatabaseQueryError, QueryResult, QueryTimeout
 from safe_db_mcp.guards import QueryRejected, apply_row_limit, check_query, mask_rows
 from safe_db_mcp.relationships import RelationshipGraph
+from safe_db_mcp.privacy import PrivacyBlocked, PrivacyPolicy, Reason
 
 
 class SafeQueryRunner:
@@ -23,19 +24,26 @@ class SafeQueryRunner:
         max_rows: int,
         masked_columns: Iterable[str] = (),
         relationships: RelationshipGraph | None = None,
+        privacy_policy: PrivacyPolicy | None = None,
+        timeout_seconds: float = 10.0,
     ):
         self._database = database
         self._audit_log = audit_log
         self._max_rows = max_rows
         self._masked_columns = frozenset(name.lower() for name in masked_columns)
-        self.relationships = relationships
+        self.privacy_policy = privacy_policy
+        # Relationship metadata includes arbitrary notes/SQL; never expose it through strict tools.
+        self.relationships = relationships if privacy_policy is None else None
+        self._timeout_seconds = timeout_seconds
 
     def run_query(self, sql: str) -> dict[str, Any]:
+        if self.privacy_policy is not None:
+            return self._protected("run_query", lambda: self._private_query(sql))
         started = time.monotonic()
         try:
-            statement_kind = check_query(sql, self._database.dialect, self._masked_columns)
-        except QueryRejected as rejection:
-            self._audit_log.record(tool="run_query", outcome="rejected", sql=sql, reason=rejection.reason)
+            check_query(sql, self._database.dialect, self._masked_columns)
+        except QueryRejected:
+            self._audit_log.record(tool="run_query", outcome="rejected", reason=Reason.GUARD)
             raise
 
         capped_sql = apply_row_limit(sql, self._database.dialect, self._max_rows)
@@ -43,49 +51,97 @@ class SafeQueryRunner:
             "run_query",
             lambda: self._database.run_query(capped_sql),
             started,
-            sql=sql,
-            executed_sql=capped_sql if capped_sql != sql else None,
-            statement_kind=statement_kind,
         )
         return self._to_response(query_result, mask_values=True)
 
     def list_tables(self) -> dict[str, Any]:
+        if self.privacy_policy is not None:
+            return self._protected("list_tables", self.privacy_policy.schema)
         query_result = self._execute("list_tables", self._database.list_tables, time.monotonic())
         return self._to_response(query_result)
 
     def describe_table(self, table_name: str) -> dict[str, Any]:
+        if self.privacy_policy is not None:
+            return self._protected("describe_table", lambda: self.privacy_policy.schema(table_name))
         query_result = self._execute(
-            "describe_table", lambda: self._database.describe_table(table_name), time.monotonic(), table=table_name
+            "describe_table", lambda: self._database.describe_table(table_name), time.monotonic()
         )
         if not query_result.rows:
             raise DatabaseQueryError(f"no table or view named {table_name!r}")
         return self._to_response(query_result)
 
     def describe_relationships(self, table_name: str) -> dict[str, Any]:
+        if self.privacy_policy is not None:
+            return self._protected("describe_relationships", self._deny_relationships)
         response = self.relationships.describe(table_name)
         self._audit_log.record(
             tool="describe_relationships",
             outcome="allowed",
-            table=table_name,
             row_count=len(response["references"]) + len(response["referenced_by"]),
         )
         return response
 
     def join_path(self, table_a: str, table_b: str) -> dict[str, Any]:
+        if self.privacy_policy is not None:
+            return self._protected("join_path", self._deny_relationships)
         response = self.relationships.join_path(table_a, table_b)
         self._audit_log.record(
-            tool="join_path", outcome="allowed", table=table_a, other_table=table_b, found=response["found"]
+            tool="join_path", outcome="allowed"
         )
         return response
 
-    def _execute(self, tool: str, run, started: float, **audit_details: Any) -> QueryResult:
+    @staticmethod
+    def _deny_relationships():
+        raise PrivacyBlocked(Reason.QUERY)
+
+    def _private_query(self, sql: str) -> dict[str, Any]:
+        plan = self.privacy_policy.authorize(sql, self._database.dialect)
+        check_query(plan.sql, self._database.dialect, self._masked_columns)
+        result = self._database.run_query(apply_row_limit(plan.sql, self._database.dialect, self._max_rows))
+        if len(result.rows) > self._max_rows:
+            raise PrivacyBlocked(Reason.BUDGET)
+        return self.privacy_policy.sanitize(result, plan, self._masked_columns)
+
+    def _protected(self, tool: str, operation) -> dict[str, Any]:
+        started = time.monotonic()
+        try:
+            response = operation()
+            if time.monotonic() - started > self._timeout_seconds:
+                raise PrivacyBlocked(Reason.TIMEOUT)
+        except Exception as error:
+            if isinstance(error, PrivacyBlocked):
+                reason = error.reason
+            elif isinstance(error, QueryRejected):
+                reason = Reason.GUARD
+            elif isinstance(error, QueryTimeout):
+                reason = Reason.TIMEOUT
+            elif isinstance(error, DatabaseQueryError):
+                reason = Reason.DATABASE
+            else:
+                reason = Reason.INTERNAL
+            self._private_audit(tool, "blocked", started, reason=reason)
+            raise PrivacyBlocked(reason) from None
+        privacy = response["privacy"]
+        self._private_audit(tool, "redacted" if privacy["decision"] == "redact" else "allowed", started,
+                            reason=Reason(privacy["reasons"][0]), row_count=response["row_count"],
+                            truncated=response["truncated"], redacted_cells=privacy["redacted_cells"])
+        return response
+
+    def _private_audit(self, tool, outcome, started, **metadata):
+        try:
+            self._audit_log.record(tool=tool, outcome=outcome, privacy_mode="strict",
+                                   duration_ms=round((time.monotonic() - started) * 1000, 1), **metadata)
+        except Exception:
+            raise PrivacyBlocked(Reason.AUDIT) from None
+
+    def _execute(self, tool: str, run, started: float) -> QueryResult:
         try:
             query_result = run()
-        except QueryTimeout as timeout:
-            self._audit_log.record(tool=tool, outcome="timeout", reason=str(timeout), **audit_details)
+        except QueryTimeout:
+            self._audit_log.record(tool=tool, outcome="timeout", reason=Reason.TIMEOUT)
             raise
-        except DatabaseQueryError as error:
-            self._audit_log.record(tool=tool, outcome="error", reason=str(error), **audit_details)
+        except DatabaseQueryError:
+            self._audit_log.record(tool=tool, outcome="error", reason=Reason.DATABASE)
             raise
         self._audit_log.record(
             tool=tool,
@@ -93,7 +149,6 @@ class SafeQueryRunner:
             row_count=len(query_result.rows),
             truncated=query_result.truncated,
             duration_ms=round((time.monotonic() - started) * 1000, 1),
-            **audit_details,
         )
         return query_result
 
@@ -115,6 +170,7 @@ class SafeQueryRunner:
                 f"Only the first {len(masked_rows)} rows are shown. "
                 "Add filters, aggregate, or page with LIMIT/OFFSET to see the rest."
             )
+        response["privacy"] = {"mode": "legacy", "strict_protection": False}
         return response
 
 

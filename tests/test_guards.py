@@ -149,3 +149,86 @@ def test_mask_rows_hides_masked_values_but_keeps_nulls():
 
 def test_mask_rows_without_masked_columns_returns_rows_unchanged():
     assert mask_rows(["id"], [(1,), (2,)], []) == [(1,), (2,)]
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "mysql"])
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH c(id, contact, note) AS (SELECT * FROM customers) SELECT contact FROM c",
+        "WITH c(id, contact, note) AS (SELECT src.* FROM customers src) SELECT contact FROM c",
+        "WITH source AS (SELECT * FROM customers), "
+        "renamed(id, contact, note) AS (SELECT * FROM source) SELECT contact FROM renamed",
+        "WITH RECURSIVE c(id, contact, note) AS ("
+        "SELECT * FROM customers UNION ALL SELECT id, contact, note FROM c WHERE 0"
+        ") SELECT contact FROM c",
+        "WITH c(id, contact, note) AS ("
+        "SELECT * FROM customers UNION ALL SELECT * FROM customers"
+        ") SELECT contact FROM c",
+        "SELECT contact FROM (SELECT * FROM customers) AS c(id, contact, note)",
+        "SELECT contact FROM customers AS c(id, contact, note)",
+        "WITH c(id, contact, note) AS (TABLE customers) SELECT contact FROM c",
+    ],
+)
+def test_column_list_aliases_cannot_hide_unknown_masked_lineage(dialect, sql):
+    with pytest.raises(QueryRejected, match="column-list aliases"):
+        check_query(sql, dialect, MASKED_COLUMNS)
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "mysql"])
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH c(customer_id, full_name) AS (SELECT id, name FROM customers) SELECT full_name FROM c",
+        "WITH c(n) AS (SELECT COUNT(*) FROM customers) SELECT n FROM c",
+        "WITH c(n) AS (SELECT COUNT(*) FROM customers UNION ALL SELECT COUNT(*) FROM orders) SELECT n FROM c",
+        "WITH c AS (SELECT * FROM orders) SELECT COUNT(*) FROM c",
+        "WITH c(n) AS (SELECT COUNT(*) FROM customers WHERE EXISTS (SELECT * FROM orders)) SELECT n FROM c",
+        "SELECT customer_id FROM (SELECT id FROM customers) AS c(customer_id)",
+    ],
+)
+def test_explicit_unmasked_aliases_and_count_star_still_work(dialect, sql):
+    assert check_query(sql, dialect, MASKED_COLUMNS) == "select"
+
+
+def test_wildcard_column_list_aliases_are_unchanged_without_masking():
+    sql = "WITH c(id, contact, note) AS (SELECT * FROM customers) SELECT contact FROM c"
+    assert check_query(sql, "sqlite") == "select"
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "mysql"])
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT (SELECT * FROM contacts LIMIT 1) AS contact",
+        "WITH c(contact) AS (SELECT (SELECT * FROM contacts LIMIT 1)) SELECT contact FROM c",
+        "SELECT COALESCE((SELECT * FROM contacts LIMIT 1), 'none') AS contact",
+        "SELECT (SELECT c.* FROM contacts c LIMIT 1) AS contact",
+        "SELECT 1 WHERE (SELECT * FROM contacts LIMIT 1) IS NOT NULL",
+        "SELECT 1 WHERE 'probe' IN (SELECT * FROM contacts)",
+        "SELECT * FROM labels UNION ALL SELECT * FROM contacts",
+        "WITH c AS (SELECT a.*, b.* FROM contacts a CROSS JOIN contacts b) SELECT * FROM c",
+        "SELECT * FROM (SELECT * FROM contacts a CROSS JOIN contacts b) AS c",
+    ],
+)
+def test_unknown_wildcard_value_lineage_is_rejected(dialect, sql):
+    with pytest.raises(QueryRejected, match="wildcard output lineage"):
+        check_query(sql, dialect, MASKED_COLUMNS)
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "mysql"])
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM contacts",
+        "SELECT c.* FROM contacts c",
+        "SELECT COUNT(*) FROM contacts",
+        "SELECT EXISTS(SELECT * FROM contacts)",
+        "SELECT EXISTS(SELECT * FROM contacts UNION ALL SELECT * FROM labels)",
+        "WITH c AS (SELECT * FROM contacts) SELECT * FROM c",
+        "SELECT * FROM (SELECT c.* FROM contacts c JOIN orders o ON c.id = o.customer_id) AS d",
+        "SELECT COUNT(*) FROM (SELECT * FROM orders) AS c",
+    ],
+)
+def test_name_preserving_stars_and_non_value_stars_remain_allowed(dialect, sql):
+    assert check_query(sql, dialect, MASKED_COLUMNS) == "select"

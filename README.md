@@ -1,16 +1,17 @@
 # safe-db-mcp
 
-**Let an AI agent query your database without letting it break anything or leak anyone's data.**
+**Read-only SQL for AI agents, with query guards and optional strict result privacy.**
 
 `safe-db-mcp` is a small [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent
 read-only SQL access to SQLite or MySQL, behind production-style guardrails: a statement allow-list, a read-only
-connection, row caps, query timeouts, PII masking and an audit log of every call. It works with any MCP app (Claude,
+connection, row caps, query timeouts, column masking and metadata-only audit logs. Opt-in strict privacy adds
+owner-approved reporting sources, typed public fields and complete private-cell redaction. It works with any MCP app (Claude,
 OpenAI Codex, Gemini CLI, Cursor, VS Code…), whichever model is behind it.
 
 ```text
 > Clean up cancelled orders
   run_query({"sql": "DELETE FROM orders WHERE status = 'cancelled'"})
-  ✗ Query rejected: DELETE statements are not allowed; only SELECT, SHOW, DESCRIBE and EXPLAIN are
+  ✗ Query rejected: BLOCK_QUERY_REJECTED. Use one permitted read-only statement.
 
 > Show me a few customers
   run_query({"sql": "SELECT id, full_name, email, phone, city FROM customers LIMIT 3"})
@@ -55,13 +56,38 @@ flowchart LR
 | 2 | **Row cap** ([`guards.py`](src/safe_db_mcp/guards.py) · [`database.py`](src/safe_db_mcp/database.py)) | Rewrites `SELECT`s to `LIMIT max_rows + 1`, so the database stops early, then fetches at most that many rows and tells the agent when the result was cut short. | Protects both the database and the agent's context window. The extra row is how we tell "exactly 200 rows" from "200 of a million". The rewritten SQL is generated from the same tree the guard checked, so **what runs is what was checked**. |
 | 3 | **Read-only connection + timeout** ([`database.py`](src/safe_db_mcp/database.py)) | SQLite opens with `mode=ro` and `PRAGMA query_only`. MySQL runs `SET SESSION TRANSACTION READ ONLY` and `MAX_EXECUTION_TIME`, with a socket read timeout as a backstop. SQLite has no statement timeout, so a progress handler aborts the query at the deadline. | Belt and braces: even if a write slipped past layer 1, the database refuses it. The tests prove this by sending `DELETE`s straight to the connection, **as MySQL root**. |
 | 4 | **PII masking** ([`guards.py`](src/safe_db_mcp/guards.py) · [`runner.py`](src/safe_db_mcp/runner.py)) | Values in configured columns (e.g. `email,phone`) come back as `[masked]`. Those columns may be selected only as-is, at the top level of the query. | Masking by column name alone is easy to dodge: `email AS x`, `lower(email)`, `UNION`, subqueries. Filtering or sorting on a masked column (`WHERE email LIKE 'a%'`) lets an agent guess the value one question at a time. Those patterns are rejected. |
-| 5 | **Audit log** ([`audit.py`](src/safe_db_mcp/audit.py)) | One JSON line per tool call, whether it was allowed, rejected, failed or timed out. Each line has the original SQL, the SQL actually executed, the row count, the duration and the reason. The file is created owner-only (`0600`). | When someone asks "what did the agent look at last Tuesday?", there's an answer. |
+| 5 | **Audit log** ([`audit.py`](src/safe_db_mcp/audit.py)) | Typed metadata only: event ID, tool, outcome, fixed reason code, counts and duration. No SQL, query literals, row values, driver errors or arbitrary details. New files are created owner-only (`0600`). An unavailable audit blocks delivery. | Query literals and errors can themselves contain private information, so the log must not become a second data store. |
 | 6 | **Credentials out of reach** ([`config.py`](src/safe_db_mcp/config.py)) | Connection settings come from environment variables. The password comes from `SAFE_DB_PASSWORD` or the OS keychain, and it never appears in `repr()` or logs. | No tool takes a host, user or password argument, so a prompt can't redirect the server to another database or extract the secret. |
+| 7 | **Strict result privacy** ([`privacy.py`](src/safe_db_mcp/privacy.py)) | Optional local policy permits only explicit fields from approved sources. Public values must match their declared number range, enum or calendar month; private cells become `[REDACTED]`. Ambiguous queries, unsupported values and exceeded budgets block the entire response. | Privacy depends on explicit classification and proven source identity, rather than assuming a regex can find every private value. |
 
 Agents get three tools, each marked `readOnlyHint`: `list_tables`, `describe_table(table_name)` and `run_query(sql)`.
 Two more appear when you give the server a file of approved joins (see [Approved joins](#approved-joins-optional)).
-Errors come back as plain sentences ("Query rejected: …", "Query timed out: … Narrow it with filters or LIMIT."), so the
-agent can correct itself instead of retrying blindly.
+Errors return fixed codes and guidance, without SQL fragments or driver diagnostics. Strict mode exposes only the
+three base tools and policy-approved schema; approved-join tools remain available in legacy mode.
+
+## Strict privacy setup
+
+Set `SAFE_DB_PRIVACY_POLICY=/absolute/path/to/result-policy.json` in the MCP server environment and restart it.
+The policy is authored locally by the database owner, never supplied through an agent tool. Invalid or unavailable
+policies prevent startup; failed privacy checks never fall back to legacy masking.
+
+For the **fictional demo database only**, run `uv run python demo/build_sample_db.py` and use
+[`demo/privacy-policy.json`](demo/privacy-policy.json). Then ask for:
+
+```sql
+SELECT month, orders, revenue FROM monthly_revenue ORDER BY month
+SELECT city, full_name, email, phone FROM customer_report LIMIT 3
+```
+
+The first returns approved monthly totals. The second returns cities with every non-null name, email and phone
+replaced by `[REDACTED]`. `SELECT email AS city`, filters on private fields, joins and expressions are blocked.
+Put aggregate logic and joins in DBA-reviewed reporting views before classifying their outputs.
+
+**Strict privacy is opt-in.** Without the environment variable, existing query functionality remains available and
+responses/startup instructions explicitly identify legacy mode with strict protection off. Column masking alone
+does not recognize private information hidden in arbitrary free text or renamed database columns.
+
+Read the [policy format, supported queries, migration notes and limits](docs/privacy.md) before using a real database.
 
 ## Quickstart
 
@@ -160,6 +186,7 @@ Most apps take the same JSON block:
 | `SAFE_DB_TIMEOUT_SECONDS` | `10` | Per-query time limit |
 | `SAFE_DB_MASKED_COLUMNS` | none | Comma-separated column names to mask, case-insensitive |
 | `SAFE_DB_AUDIT_LOG` | `~/.safe-db-mcp/audit.jsonl` | Where the audit log is appended |
+| `SAFE_DB_PRIVACY_POLICY` | unset (legacy mode) | Local strict privacy JSON policy; if set it must be nonempty, valid and readable |
 | `SAFE_DB_RELATIONSHIPS_FILE` | none | A reviewed `relationships.yml`; turns on `join_path` and `describe_relationships` |
 
 ### MySQL
@@ -243,8 +270,8 @@ relationships:
 uv run pytest
 ```
 
-There are 132 unit tests covering the guards, the database layer, config, the audit log, approved joins and the MCP server end to
-end (in-memory client). Seven more MySQL integration tests run against a throwaway container:
+Tests cover guards, result privacy, failure paths, the database layer, config, metadata-only audit, approved joins
+and the MCP server end to end. Separate MySQL integration tests run against a throwaway container:
 
 ```bash
 docker run -d --name safe-db-mcp-test-mysql -e MYSQL_ROOT_PASSWORD=test-only-root-pw -e MYSQL_DATABASE=shop -p 127.0.0.1:33061:3306 mysql:8.4
@@ -284,15 +311,25 @@ teach people to switch it off.
 
 This is defence in depth, not a proof. Specifically:
 
-- **Masking works on column names.** A view or another table that holds the same data under a different name isn't
+- **Legacy masking works on column names.** A view or another table that holds the same data under a different name isn't
   covered. Real enforcement belongs in the database: views without the PII, column-level grants. Masked columns also
   can't be filtered or sorted, which is a deliberate trade of convenience for safety.
+  When masking is configured, CTE or derived-table column lists over `SELECT *` or other unresolved sources are
+  rejected because positional renaming can hide the original protected names. Use explicit unmasked projections
+  instead. Column lists over explicit unmasked projections and aggregates such as `COUNT(*)` remain supported.
+  Value-producing scalar stars, wildcard set-operation branches and nested multi-source stars are also rejected:
+  they can lose or rewrite protected output names. Plain `SELECT *`, simple name-preserving nested stars,
+  `COUNT(*)` and direct `EXISTS(SELECT *)` remain supported. These checks still cannot recognize renamed copies
+  already stored in a view or table.
 - **The parser isn't the database.** sqlglot and SQLite or MySQL could disagree about an odd piece of syntax. Layer 3
   exists for that case. For `SELECT`s, the executed SQL is regenerated from the checked tree, which narrows the gap.
 - **MySQL's `MAX_EXECUTION_TIME` only covers `SELECT`.** `SHOW` and `DESCRIBE` rely on the socket read timeout.
-- **Data can carry instructions.** A row containing "ignore previous instructions…" is returned like any other value.
+- **Data can carry instructions.** In legacy mode, a row containing "ignore previous instructions…" is returned like any other value.
   The server stops the agent from *acting* on the database, but it can't stop the agent from *reading* text that tries
   to steer it. Treat query results as untrusted input in your agent loop.
+- **Strict redaction depends on the owner's classifications.** Public numbers, enums and months can still identify people
+  through context, small groups or repeated queries. No differential privacy, k-anonymity or comprehensive PII detection
+  is provided. Whole private cells are removed without reversible mappings; this is not a guarantee of irreversible anonymisation.
 - **The audit log is a local file.** It's append-only by convention, not tamper-proof. In production, ship it to your
   log pipeline.
 - **Approved joins are only as good as the review.** The server trusts `status: approved`. It doesn't check that
@@ -305,7 +342,9 @@ This is defence in depth, not a proof. Specifically:
 src/safe_db_mcp/
   guards.py     statement allow-list, row-limit rewrite, masking rules
   database.py   read-only SQLite / MySQL backends, row cap, timeouts
-  runner.py     check → cap → execute → mask → audit, in that order
+  runner.py     authorize → cap → execute → sanitize → audit → release (strict mode)
+  privacy.py    local policy, narrow query provenance, typed validation, whole-cell redaction
+  diagnostics.py  suppress SQL fragments in parser/generator logs
   relationships.py  approved joins from relationships.yml, shortest join paths
   audit.py      JSON-lines audit log
   config.py     settings from env, password from env or keychain

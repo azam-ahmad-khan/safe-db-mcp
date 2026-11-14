@@ -74,7 +74,7 @@ async def run_walkthrough() -> None:
     print(f"\n\033[1mAudit log\033[0m ({audit_log_path}):")
     for line in audit_log_path.read_text().splitlines():
         entry = json.loads(line)
-        print(f"  {entry['outcome']:<8} {entry['tool']:<15} {entry.get('sql') or entry.get('table') or ''}")
+        print(f"  {entry['outcome']:<8} {entry['tool']:<15} {entry.get('reason') or ''}")
 
 
 if __name__ == "__main__":

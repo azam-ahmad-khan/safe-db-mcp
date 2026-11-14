@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "limits": {"max_cell_bytes": 16384, "max_result_bytes": 262144, "max_cells": 10000},
+  "sources": {
+    "monthly_revenue": {
+      "month": {"kind": "public_month", "nullable": false},
+      "orders": {"kind": "public_number", "min": 0, "max": 1000, "nullable": false},
+      "revenue": {"kind": "public_number", "min": 0, "max": 10000000, "nullable": false}
+    },
+    "customer_report": {
+      "city": {"kind": "public_enum", "values": ["Springfield", "Riverside", "Lakeview", "Hillcrest", "Fairview", "Oakridge"], "nullable": false},
+      "full_name": {"kind": "redact_cell", "nullable": false},
+      "email": {"kind": "redact_cell", "nullable": false},
+      "phone": {"kind": "redact_cell", "nullable": true}
+    }
+  }
+}

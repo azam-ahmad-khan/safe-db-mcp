@@ -13,6 +13,7 @@ from collections.abc import Iterable, Sequence
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import SqlglotError
+from safe_db_mcp import diagnostics  # noqa: F401 -- installs safe parser diagnostics
 
 SUPPORTED_DIALECTS = frozenset({"sqlite", "mysql"})
 
@@ -170,6 +171,8 @@ def _check_masked_column_usage(statement: exp.Expression, masked_column_names: f
     """
     if not masked_column_names:
         return
+    _check_column_list_aliases(statement)
+    _check_wildcard_lineage(statement)
     for column in statement.find_all(exp.Column):
         if column.name.lower() not in masked_column_names:
             continue
@@ -181,6 +184,81 @@ def _check_masked_column_usage(statement: exp.Expression, masked_column_names: f
                 f"masked column '{column.name}' can only be selected directly, "
                 "not aliased, transformed, filtered, joined, sorted or used in a subquery"
             )
+
+
+def _check_column_list_aliases(statement: exp.Expression) -> None:
+    """Do not let positional aliases rename a masked column hidden inside a star.
+
+    CTE and derived-table column lists rename outputs without creating exp.Column
+    nodes for the original names. Without schema lineage, SELECT * cannot tell us
+    which renamed output was protected. Fail closed for those sources; explicit
+    projections remain covered by the normal masked-column checks above.
+    """
+    for alias in statement.find_all(exp.TableAlias):
+        if not alias.args.get("columns"):
+            continue
+        owner = alias.parent
+        source = owner.this if isinstance(owner, (exp.CTE, exp.Subquery)) else None
+        if not _has_explicit_output_names(source):
+            raise QueryRejected(
+                "column-list aliases over wildcard or unresolved sources are not allowed "
+                "while masking is configured; use explicit unmasked columns"
+            )
+
+
+def _has_explicit_output_names(source: exp.Expression | None) -> bool:
+    if source is None:
+        return False
+    source = source.unnest()
+    if isinstance(source, exp.Select):
+        return not any(_is_projection_star(projection) for projection in source.expressions)
+    if isinstance(source, exp.SetOperation):
+        return _has_explicit_output_names(source.this) and _has_explicit_output_names(source.expression)
+    # A literal VALUES table has explicit cells rather than unknown database columns.
+    return isinstance(source, exp.Values)
+
+
+def _is_projection_star(projection: exp.Expression) -> bool:
+    projection = projection.this if isinstance(projection, exp.Alias) else projection
+    return isinstance(projection, exp.Star) or (
+        isinstance(projection, exp.Column) and isinstance(projection.this, exp.Star)
+    )
+
+
+def _check_wildcard_lineage(statement: exp.Expression) -> None:
+    """A star is safe only where its original result names survive to masking.
+
+    Scalar subqueries discard names, UNION takes names from another branch, and
+    nested multi-source stars may get duplicate names rewritten by the database.
+    COUNT(*) is not a wildcard projection; EXISTS consumes no projected values.
+    """
+    for select in statement.find_all(exp.Select):
+        if not any(_is_projection_star(projection) for projection in select.expressions):
+            continue
+        query, in_set_operation = select, False
+        while query is not statement:
+            parent = query.parent
+            if isinstance(parent, (exp.Subquery, exp.Paren)):
+                query = parent
+            elif isinstance(parent, exp.SetOperation):
+                query, in_set_operation = parent, True
+            else:
+                break
+        parent = query.parent
+        if isinstance(parent, exp.Exists):
+            continue
+        if not in_set_operation:
+            if select is statement:
+                continue
+            if isinstance(parent, (exp.CTE, exp.From, exp.Join)) and len(select.expressions) == 1:
+                projection = select.expressions[0]
+                # A single qualified star keeps one source's names even with a join.
+                if isinstance(projection, exp.Column) or not select.args.get("joins"):
+                    continue
+        raise QueryRejected(
+            "wildcard output lineage is unresolved in this context while masking is configured; "
+            "use explicit unmasked columns instead"
+        )
 
 
 def _check_show(statement: exp.Show) -> None:

@@ -86,6 +86,7 @@ def build(output_path: Path = DEFAULT_OUTPUT_PATH, seed: int = 7) -> Path:
         CREATE VIEW monthly_revenue AS
             SELECT substr(ordered_on, 1, 7) AS month, COUNT(*) AS orders, ROUND(SUM(total), 2) AS revenue
             FROM orders WHERE status NOT IN ('cancelled', 'returned') GROUP BY month;
+        CREATE VIEW customer_report AS SELECT city, full_name, email, phone FROM customers;
         """
     )
 

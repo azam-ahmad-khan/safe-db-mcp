@@ -7,6 +7,7 @@ never from the agent: no tool takes a host, user or password argument.
 from __future__ import annotations
 
 import os
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,7 @@ class Settings:
     masked_columns: frozenset[str]
     audit_log_path: Path
     relationships_path: Path | None = None
+    privacy_policy_path: Path | None = None
     sqlite_path: Path | None = None
     mysql_host: str | None = None
     mysql_port: int = 3306
@@ -45,7 +47,7 @@ class Settings:
         environ = os.environ if environ is None else environ
         dialect = environ.get("SAFE_DB_DIALECT", "").strip().lower()
         if dialect not in SUPPORTED_DIALECTS:
-            raise ConfigError(f"SAFE_DB_DIALECT must be one of {sorted(SUPPORTED_DIALECTS)}, got {dialect!r}")
+            raise ConfigError(f"SAFE_DB_DIALECT must be one of {sorted(SUPPORTED_DIALECTS)}")
 
         common_settings = {
             "dialect": dialect,
@@ -56,6 +58,8 @@ class Settings:
             ),
             "audit_log_path": Path(environ.get("SAFE_DB_AUDIT_LOG") or DEFAULT_AUDIT_LOG_PATH).expanduser(),
             "relationships_path": _optional_path(environ, "SAFE_DB_RELATIONSHIPS_FILE"),
+            "privacy_policy_path": (Path(_required(environ, "SAFE_DB_PRIVACY_POLICY")).expanduser()
+                                    if "SAFE_DB_PRIVACY_POLICY" in environ else None),
         }
 
         if dialect == "sqlite":
@@ -116,8 +120,8 @@ def _positive_number(environ: Mapping[str, str], name: str, default, number_type
         return default
     try:
         value = number_type(raw_value)
-    except ValueError as error:
-        raise ConfigError(f"{name} must be a number, got {raw_value!r}") from error
-    if value <= 0:
-        raise ConfigError(f"{name} must be greater than zero, got {raw_value!r}")
+    except ValueError:
+        raise ConfigError(f"{name} must be a number") from None
+    if value <= 0 or (number_type is float and not math.isfinite(value)):
+        raise ConfigError(f"{name} must be finite and greater than zero")
     return value
