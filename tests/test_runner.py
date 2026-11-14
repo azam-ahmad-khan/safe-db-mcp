@@ -41,16 +41,17 @@ def test_rejected_query_is_audited_and_never_reaches_the_database(runner, audit_
     rejected_entry = read_audit_entries(audit_log)[0]
     assert rejected_entry["tool"] == "run_query"
     assert rejected_entry["outcome"] == "rejected"
-    assert rejected_entry["sql"] == "DELETE FROM customers"
-    assert "DELETE" in rejected_entry["reason"]
+    assert "sql" not in rejected_entry
+    assert rejected_entry["reason"] == "BLOCK_QUERY_REJECTED"
 
 
-def test_allowed_query_audit_entry_records_what_actually_ran(runner, audit_log):
+def test_allowed_query_audit_entry_records_metadata_without_sql(runner, audit_log):
     runner.run_query("SELECT id FROM orders")
     allowed_entry = read_audit_entries(audit_log)[0]
     assert allowed_entry["outcome"] == "allowed"
-    assert allowed_entry["sql"] == "SELECT id FROM orders"
-    assert allowed_entry["executed_sql"] == "SELECT id FROM orders LIMIT 11"
+    assert "sql" not in allowed_entry
+    assert "executed_sql" not in allowed_entry
+    assert allowed_entry["privacy_mode"] == "legacy"
     assert allowed_entry["row_count"] == TEST_MAX_ROWS
     assert allowed_entry["truncated"] is True
     assert "duration_ms" in allowed_entry
@@ -91,3 +92,27 @@ def test_describe_unknown_table_is_an_error(runner):
 def test_list_tables(runner, audit_log):
     assert [row[0] for row in runner.list_tables()["rows"]] == ["big_orders", "customers", "orders"]
     assert read_audit_entries(audit_log)[0]["tool"] == "list_tables"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH c(id, full_name, contact, telephone) AS (SELECT * FROM customers) "
+        "SELECT contact, telephone FROM c",
+        "WITH source AS (SELECT * FROM customers), "
+        "renamed(id, full_name, contact, telephone) AS (SELECT * FROM source) "
+        "SELECT contact FROM renamed",
+        "WITH RECURSIVE c(id, full_name, contact, telephone) AS ("
+        "SELECT * FROM customers WHERE id = 1 "
+        "UNION ALL SELECT id, full_name, contact, telephone FROM c WHERE 0"
+        ") SELECT contact FROM c",
+    ],
+)
+def test_masked_cte_alias_bypass_is_rejected_before_database_access(runner, audit_log, monkeypatch, sql):
+    def must_not_execute(*args, **kwargs):
+        raise AssertionError("a rejected masking bypass must never reach the database")
+
+    monkeypatch.setattr(runner._database, "run_query", must_not_execute)
+    with pytest.raises(QueryRejected, match="column-list aliases"):
+        runner.run_query(sql)
+    assert read_audit_entries(audit_log)[0]["outcome"] == "rejected"
